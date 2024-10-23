@@ -1,36 +1,29 @@
 {
     "subreddits": [
         {
-            "name": "RussiaUkraineWar2022",
-            "crawl_interval": 5
+            "name": "RussiaUkraineWar2022"
         },
         {
-            "name": "UkraineRussiaReport",
-            "crawl_interval": 5
+            "name": "UkraineRussiaReport"
         },
         {
-            "name": "war",
-            "crawl_interval": 5
+            "name": "war"
         },
         {
-            "name": "UkraineWarVideoReport",
-            "crawl_interval": 5
+            "name": "UkraineWarVideoReport"
         },
         {
-            "name": "ukraine",
-            "crawl_interval": 5
+            "name": "ukraine"
         },
         {
-            "name": "UkrainianConflict",
-            "crawl_interval": 5
+            "name": "UkrainianConflict"
         },
         {
-            "name": "AskARussian",
-            "crawl_interval": 5
+            "name": "AskARussian"
         }
     ],
     "crawl_settings": {
-        "default_crawl_interval": 5,
+        "crawl_interval": 5,
         "recrawl_delays": [1, 3, 7],
         "consumer_concurrency": 5
     },

@@ -62,24 +62,28 @@ def schedule_post_recrawls(subreddit, post_id):
         recrawl_delays = CONFIG['crawl_settings']['recrawl_delays']
         
         for delay in recrawl_delays:
-            run_at = (datetime.datetime.now(datetime.UTC) + 
-                     datetime.timedelta(days=delay)).isoformat()
+            # Calculate future time correctly
+            run_at = (datetime.datetime.now() + datetime.timedelta(days=delay)).astimezone(datetime.UTC).isoformat()
             job = Job(jobtype="crawl-post",
                      args=(subreddit, post_id, True),
                      queue="crawl-post",
                      at=run_at)
             producer.push(job)
-            logger.debug(f"Scheduled {delay}-day recrawl for post {post_id} at {run_at}")
+            logger.info(f"[SCHEDULE] Post {post_id} from r/{subreddit} will be recrawled in {delay} days at {run_at}")
 
 def crawl_post(subreddit, post_id, is_recrawl=False):
     """Crawl a single Reddit post and its comments"""
     try:
-        logger.info(f"{'Re-crawling' if is_recrawl else 'Crawling'} post {post_id}")
+        if is_recrawl:
+            logger.info(f"[START] Recrawling post {post_id} from r/{subreddit}")
+        else:
+            logger.info(f"[START] Crawling new post {post_id} from r/{subreddit}")
+
         reddit_client = RedditClient()
         post_data = reddit_client.get_post_comments(post_id)
         
         if not post_data:
-            logger.warning(f"Failed to retrieve data for post {post_id}")
+            logger.warning(f"[FAILED] Could not retrieve data for post {post_id} from r/{subreddit}")
             return
 
         with psycopg2.connect(dsn=DATABASE_URL) as conn:
@@ -102,6 +106,7 @@ def crawl_post(subreddit, post_id, is_recrawl=False):
                               main_post['score'], Json(main_post)))
                 
                 # Process comments
+                comment_count = 0
                 for comment in post_data[1]['data']['children']:
                     comment_data = comment['data']
                     q = """
@@ -119,66 +124,66 @@ def crawl_post(subreddit, post_id, is_recrawl=False):
                                   tz=datetime.UTC),
                                   comment_data['score'], comment_data['body'], 
                                   Json(comment_data)))
+                    comment_count += 1
                 
                 conn.commit()
+
+        logger.info(f"[PROCESSED] Post {post_id} from r/{subreddit}: {comment_count} comments stored")
 
         # Schedule recrawls only for initial crawl of posts with positive score
         if not is_recrawl and main_post['score'] > 0:
             schedule_post_recrawls(subreddit, post_id)
         
-        logger.info(f"Finished {'re-crawling' if is_recrawl else 'crawling'} post {post_id}")
+        logger.info(f"[COMPLETE] {'Recrawl' if is_recrawl else 'Initial crawl'} of post {post_id} from r/{subreddit}")
                 
     except psycopg2.Error as e:
-        logger.error(f"Database error in crawl_post: {e}")
+        logger.error(f"[ERROR] Database error while crawling post {post_id}: {e}")
     except Exception as e:
-        logger.error(f"Error crawling post {post_id}: {e}")
+        logger.error(f"[ERROR] Error while crawling post {post_id}: {e}")
 
 def crawl_subreddit(subreddit_name, previous_post_ids=[]):
     """Crawl a subreddit and detect new posts"""
     try:
-        logger.info(f"Starting to crawl subreddit {subreddit_name}")
+        logger.info(f"[START] Crawling subreddit r/{subreddit_name}")
         reddit_client = RedditClient()
         current_listing = reddit_client.get_subreddit_new(subreddit_name)
 
         if not current_listing:
-            logger.warning(f"Failed to retrieve posts for subreddit {subreddit_name}")
+            logger.warning(f"[FAILED] Could not retrieve posts for r/{subreddit_name}")
             return
 
         current_post_ids = post_ids_from_listing(current_listing)
         new_posts = find_new_posts(previous_post_ids, current_post_ids)
         
-        logger.info(f"Found {len(new_posts)} new posts in {subreddit_name}")
+        logger.info(f"[DETECTED] Found {len(new_posts)} new posts in r/{subreddit_name}")
 
         with Client(faktory_url=FAKTORY_SERVER_URL, role="producer") as client:
             producer = Producer(client=client)
             
             # Queue jobs for new posts
-            crawl_post_jobs = [
-                Job(jobtype="crawl-post",
-                    args=(subreddit_name, post_id),
-                    queue="crawl-post")
-                for post_id in new_posts
-            ]
-            producer.push_bulk(crawl_post_jobs)
+            for post_id in new_posts:
+                job = Job(jobtype="crawl-post",
+                         args=(subreddit_name, post_id),
+                         queue="crawl-post")
+                producer.push(job)
+                logger.info(f"[SCHEDULE] Queued new post {post_id} from r/{subreddit_name} for crawling")
 
-            # Get crawl interval for this subreddit
-            subreddit_config = get_subreddit_config(subreddit_name)
-            crawl_interval = (subreddit_config.get('crawl_interval') or 
-                            CONFIG['crawl_settings']['default_crawl_interval'])
-
-            # Schedule next subreddit crawl
-            run_at = (datetime.datetime.now(datetime.UTC) + 
-                     datetime.timedelta(minutes=crawl_interval)).isoformat()
+            # Schedule next subreddit crawl using the corrected timezone handling
+            crawl_interval = CONFIG['crawl_settings']['crawl_interval']
+            next_crawl_time = (datetime.datetime.now() + datetime.timedelta(minutes=crawl_interval)).astimezone(datetime.UTC)
+            run_at = next_crawl_time.isoformat()
+            
             next_job = Job(jobtype="crawl-subreddit",
                          args=(subreddit_name, current_post_ids),
                          queue="crawl-subreddit",
                          at=run_at)
             producer.push(next_job)
+            logger.info(f"[SCHEDULE] Next crawl for r/{subreddit_name} scheduled at {next_crawl_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         
-        logger.info(f"Finished crawling subreddit {subreddit_name}")
+        logger.info(f"[COMPLETE] Finished crawling r/{subreddit_name}")
             
     except Exception as e:
-        logger.error(f"Error crawling subreddit {subreddit_name}: {e}")
+        logger.error(f"[ERROR] Error while crawling r/{subreddit_name}: {e}")
 
 def schedule_initial_crawls():
     """Schedule initial crawls for all configured subreddits"""
@@ -189,10 +194,10 @@ def schedule_initial_crawls():
                      args=(subreddit['name'], []),
                      queue="crawl-subreddit")
             producer.push(job)
-            logger.info(f"Scheduled initial crawl for subreddit: {subreddit['name']}")
+            logger.info(f"[SCHEDULE] Initial crawl scheduled for r/{subreddit['name']}")
 
 if __name__ == "__main__":
-    logger.info("Starting Reddit crawler")
+    logger.info("[START] Starting Reddit crawler")
     schedule_initial_crawls()
     
     with Client(faktory_url=FAKTORY_SERVER_URL, role="consumer") as client:
