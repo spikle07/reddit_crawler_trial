@@ -2,6 +2,24 @@
     "subreddits": [
         {
             "name": "RussiaUkraineWar2022"
+        },
+        {
+            "name": "UkraineRussiaReport"
+        },
+        {
+            "name": "war"
+        },
+        {
+            "name": "UkraineWarVideoReport"
+        },
+        {
+            "name": "ukraine"
+        },
+        {
+            "name": "UkrainianConflict"
+        },
+        {
+            "name": "AskARussian"
         }
     ],
     "crawl_settings": {
