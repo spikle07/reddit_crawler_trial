@@ -1,13 +1,13 @@
-from reddit_client import RedditClient, RateLimitException
+from reddit_client import RedditClient
 import logging
+from logging import handlers
 from pyfaktory import Client, Consumer, Job, Producer
 import datetime
 import psycopg2
 from psycopg2.extras import Json
 from psycopg2.extensions import register_adapter
 register_adapter(dict, Json)
-import random
-from typing import Optional
+
 from dotenv import load_dotenv
 import os
 import json
@@ -30,85 +30,25 @@ FAKTORY_SERVER_URL = os.getenv('FAKTORY_SERVER_URL')
 # Logger setup
 logger = logging.getLogger("reddit crawler")
 logger.setLevel(getattr(logging, CONFIG['logging']['level']))
-sh = logging.StreamHandler()
-formatter = logging.Formatter(CONFIG['logging']['format'])
-sh.setFormatter(formatter)
-logger.addHandler(sh)
 
-def calculate_backoff(retry_count: int, base_delay: int = 60) -> int:
-    """Calculate exponential backoff with jitter
-    
-    Args:
-        retry_count: Number of retries so far
-        base_delay: Base delay in seconds (default 60s = 1 min)
-    
-    Returns:
-        Delay in seconds for next retry
-    """
-    # Exponential backoff: 1min, 2min, 4min, 8min, etc
-    delay = base_delay * (2 ** retry_count)
-    # Add jitter of ±25% to prevent thundering herd
-    jitter = random.uniform(0.75, 1.25)
-    return int(delay * jitter)
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
 
-def reschedule_job(
-    producer: Producer,
-    jobtype: str,
-    args: tuple,
-    queue: str,
-    retry_count: Optional[int] = None,
-    max_retries: int = 5
-) -> bool:
-    """Reschedule a job with exponential backoff
-    
-    Args:
-        producer: Faktory producer instance
-        jobtype: Type of job to schedule
-        args: Job arguments
-        queue: Queue name
-        retry_count: Current retry count (if None, assumed to be custom arg)
-        max_retries: Maximum number of retries allowed
-    
-    Returns:
-        bool: True if job was rescheduled, False if max retries exceeded
-    """
-    # If retry_count not provided, check if it's in the last argument
-    if retry_count is None:
-        retry_count = args[-1].get('retry_count', 0) if isinstance(args[-1], dict) else 0
-    
-    if retry_count >= max_retries:
-        logger.error(f"[MAX_RETRIES] Job {jobtype} with args {args} exceeded maximum retries")
-        return False
-    
-    # Calculate delay using exponential backoff
-    delay = calculate_backoff(retry_count)
-    next_try = datetime.datetime.now(datetime.UTC) + datetime.timedelta(seconds=delay)
-    
-    # Create metadata dict if it doesn't exist
-    metadata = args[-1] if isinstance(args[-1], dict) else {}
-    new_args = list(args[:-1]) if isinstance(args[-1], dict) else list(args)
-    
-    # Update metadata
-    metadata.update({
-        'retry_count': retry_count + 1,
-        'previous_retries': metadata.get('previous_retries', []) + [datetime.datetime.now(datetime.UTC).isoformat()]
-    })
-    new_args.append(metadata)
-    
-    # Schedule new job
-    job = Job(
-        jobtype=jobtype,
-        args=tuple(new_args),
-        queue=queue,
-        at=next_try.isoformat()
-    )
-    producer.push(job)
-    
-    logger.info(
-        f"[RATE_LIMIT] Rescheduled {jobtype} for {next_try.isoformat()} "
-        f"(retry {retry_count + 1}/{max_retries}, delay: {delay}s)"
-    )
-    return True
+# File handler - for storing logs in a file
+# Using TimedRotatingFileHandler to create new log file each day
+file_handler = logging.handlers.TimedRotatingFileHandler(
+    filename='logs/reddit_crawler.log',
+    when='midnight',
+    interval=1,
+    backupCount=30  # Keep logs for 30 days
+)
+file_handler.setFormatter(logging.Formatter(CONFIG['logging']['format']))
+logger.addHandler(file_handler)
+
+# Stream handler - for console output
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(logging.Formatter(CONFIG['logging']['format']))
+logger.addHandler(stream_handler)
 
 def get_subreddit_config(subreddit_name):
     """Get configuration for a specific subreddit"""
@@ -141,13 +81,13 @@ def schedule_post_recrawls(subreddit, post_id):
             next_crawl_time = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=delay)
             run_at = next_crawl_time.isoformat()
             job = Job(jobtype="crawl-post",
-                     args=(subreddit, post_id, True, {}),
+                     args=(subreddit, post_id, True),
                      queue="crawl-post",
                      at=run_at)
             producer.push(job)
             logger.info(f"[SCHEDULE] Post {post_id} from r/{subreddit} will be recrawled in {delay} days at {run_at}")
 
-def crawl_post(subreddit: str, post_id: str, is_recrawl: bool = False, metadata: dict = None):
+def crawl_post(subreddit, post_id, is_recrawl=False):
     """Crawl a single Reddit post and its comments"""
     try:
         if is_recrawl:
@@ -156,18 +96,7 @@ def crawl_post(subreddit: str, post_id: str, is_recrawl: bool = False, metadata:
             logger.info(f"[START] Crawling new post {post_id} from r/{subreddit}")
 
         reddit_client = RedditClient()
-        try:
-            post_data = reddit_client.get_post_comments(post_id)
-        except RateLimitException:
-            with Client(faktory_url=FAKTORY_SERVER_URL, role="producer") as client:
-                if not reschedule_job(
-                    producer=Producer(client=client),
-                    jobtype="crawl-post",
-                    args=(subreddit, post_id, is_recrawl, metadata or {}),
-                    queue="crawl-post"
-                ):
-                    logger.error(f"[FAILED] Post {post_id} from r/{subreddit} exceeded max retries")
-            return
+        post_data = reddit_client.get_post_comments(post_id)
         
         if not post_data:
             logger.warning(f"[FAILED] Could not retrieve data for post {post_id} from r/{subreddit}")
@@ -228,31 +157,19 @@ def crawl_post(subreddit: str, post_id: str, is_recrawl: bool = False, metadata:
     except Exception as e:
         logger.error(f"[ERROR] Error while crawling post {post_id}: {e}")
 
-def crawl_subreddit(subreddit_name: str, previous_post_ids: list = None, metadata: dict = None):
+def crawl_subreddit(subreddit_name, previous_post_ids=[]):
     """Crawl a subreddit and detect new posts"""
     try:
         logger.info(f"[START] Crawling subreddit r/{subreddit_name}")
         reddit_client = RedditClient()
-        
-        try:
-            current_listing = reddit_client.get_subreddit_new(subreddit_name)
-        except RateLimitException:
-            with Client(faktory_url=FAKTORY_SERVER_URL, role="producer") as client:
-                if not reschedule_job(
-                    producer=Producer(client=client),
-                    jobtype="crawl-subreddit",
-                    args=(subreddit_name, previous_post_ids or [], metadata or {}),
-                    queue="crawl-subreddit"
-                ):
-                    logger.error(f"[FAILED] Subreddit r/{subreddit_name} exceeded max retries")
-            return
+        current_listing = reddit_client.get_subreddit_new(subreddit_name)
 
         if not current_listing:
             logger.warning(f"[FAILED] Could not retrieve posts for r/{subreddit_name}")
             return
 
         current_post_ids = post_ids_from_listing(current_listing)
-        new_posts = find_new_posts(previous_post_ids or [], current_post_ids)
+        new_posts = find_new_posts(previous_post_ids, current_post_ids)
         
         logger.info(f"[DETECTED] Found {len(new_posts)} new posts in r/{subreddit_name}")
 
@@ -262,7 +179,7 @@ def crawl_subreddit(subreddit_name: str, previous_post_ids: list = None, metadat
             # Queue jobs for new posts
             for post_id in new_posts:
                 job = Job(jobtype="crawl-post",
-                         args=(subreddit_name, post_id, False, {}),
+                         args=(subreddit_name, post_id),
                          queue="crawl-post")
                 producer.push(job)
                 logger.info(f"[SCHEDULE] Queued new post {post_id} from r/{subreddit_name} for crawling")
@@ -273,10 +190,10 @@ def crawl_subreddit(subreddit_name: str, previous_post_ids: list = None, metadat
             run_at = next_crawl_time.isoformat()
             
             next_job = Job(jobtype="crawl-subreddit",
-                         args=(subreddit_name, current_post_ids, {}),
+                         args=(subreddit_name, current_post_ids),
                          queue="crawl-subreddit",
                          at=run_at)
-            producer.push(job)
+            producer.push(next_job)
             logger.info(f"[SCHEDULE] Next crawl for r/{subreddit_name} scheduled at {next_crawl_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
         
         logger.info(f"[COMPLETE] Finished crawling r/{subreddit_name}")
@@ -290,7 +207,7 @@ def schedule_initial_crawls():
         producer = Producer(client=client)
         for subreddit in CONFIG['subreddits']:
             job = Job(jobtype="crawl-subreddit",
-                     args=(subreddit['name'], [], {}),
+                     args=(subreddit['name'], []),
                      queue="crawl-subreddit")
             producer.push(job)
             logger.info(f"[SCHEDULE] Initial crawl scheduled for r/{subreddit['name']}")

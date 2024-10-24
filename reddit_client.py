@@ -2,6 +2,7 @@ import logging
 import requests
 from dotenv import load_dotenv
 import os
+import datetime
 
 # Load environment variables
 load_dotenv()
@@ -14,6 +15,9 @@ sh = logging.StreamHandler()
 formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 sh.setFormatter(formatter)
 logger.addHandler(sh)
+
+class RateLimitException(Exception):
+    pass
 
 class RedditClient:
     API_BASE = "https://oauth.reddit.com"
@@ -61,6 +65,9 @@ class RedditClient:
             if resp.status_code == 404:
                 logger.warning(f"404 Not Found: {url}")
                 return None
+            elif resp.status_code == 429:
+                logger.warning("Rate limit reached (429). Request will be rescheduled.")
+                raise RateLimitException("Rate limit reached")
             resp.raise_for_status()
             logger.info(f"Status code: {resp.status_code}")
             json_data = resp.json()
@@ -68,6 +75,8 @@ class RedditClient:
             return json_data
         except requests.exceptions.RequestException as e:
             logger.error(f"Error making request: {e}")
+            if isinstance(e, requests.exceptions.HTTPError) and e.response.status_code == 429:
+                raise RateLimitException("Rate limit reached")
             return None
 
 if __name__ == "__main__":
@@ -92,4 +101,4 @@ if __name__ == "__main__":
         print("Comments data retrieved successfully")
         print(f"Number of top-level comments: {len(comments_data[1]['data']['children'])}")
     else:
-        print("Failed to retrieve comments data")
+        print("Failed to retrieve comments data")   
