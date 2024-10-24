@@ -62,8 +62,8 @@ def schedule_post_recrawls(subreddit, post_id):
         recrawl_delays = CONFIG['crawl_settings']['recrawl_delays']
         
         for delay in recrawl_delays:
-            # Calculate future time correctly
-            run_at = (datetime.datetime.now() + datetime.timedelta(days=delay)).astimezone(datetime.UTC).isoformat()
+            next_crawl_time = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=delay)
+            run_at = next_crawl_time.isoformat()
             job = Job(jobtype="crawl-post",
                      args=(subreddit, post_id, True),
                      queue="crawl-post",
@@ -168,9 +168,9 @@ def crawl_subreddit(subreddit_name, previous_post_ids=[]):
                 producer.push(job)
                 logger.info(f"[SCHEDULE] Queued new post {post_id} from r/{subreddit_name} for crawling")
 
-            # Schedule next subreddit crawl using the corrected timezone handling
+            # Schedule next subreddit crawl using UTC
             crawl_interval = CONFIG['crawl_settings']['crawl_interval']
-            next_crawl_time = (datetime.datetime.now() + datetime.timedelta(minutes=crawl_interval)).astimezone(datetime.UTC)
+            next_crawl_time = datetime.datetime.now(datetime.UTC) + datetime.timedelta(minutes=crawl_interval)
             run_at = next_crawl_time.isoformat()
             
             next_job = Job(jobtype="crawl-subreddit",
