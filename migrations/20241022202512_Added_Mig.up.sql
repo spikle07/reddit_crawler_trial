@@ -21,8 +21,6 @@ CREATE TABLE reddit_comments (
     score INTEGER NOT NULL,
     body TEXT NOT NULL,
     data JSONB NOT NULL,
-    depth INTEGER DEFAULT 0,
-    path ltree,
     last_updated TIMESTAMPTZ DEFAULT NOW(),
     crawled_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -34,5 +32,4 @@ CREATE INDEX idx_reddit_posts_last_updated ON reddit_posts (last_updated);
 
 CREATE INDEX idx_reddit_comments_post_id ON reddit_comments (post_id);
 CREATE INDEX idx_reddit_comments_parent_id ON reddit_comments (parent_id);
-CREATE INDEX idx_reddit_comments_path_gist ON reddit_comments USING GIST (path);
 CREATE INDEX idx_reddit_comments_last_updated ON reddit_comments (last_updated);
